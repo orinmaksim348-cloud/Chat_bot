@@ -1,27 +1,16 @@
-"""PulseChat — WhatsApp-подобный мессенджер с ИИ (GigaChat + Gemini) на Flet 1.0."""
+"""PulseChat — живой WhatsApp-мессенджер на Flet 1.0 для общения посетителей сайта + бот с заготовками."""
 
 from __future__ import annotations
 
 import datetime
 import os
+import threading
 import uuid
-from dataclasses import dataclass, field
 from typing import Any
 
 import flet as ft
-from dotenv import load_dotenv
 
-from ai_service import (
-    AIConfig,
-    DEFAULT_GEMINI_MODEL,
-    DEFAULT_GIGACHAT_MODEL,
-    DEFAULT_GIGACHAT_SCOPE,
-    DEFAULT_OPENAI_BASE_URL,
-    DEFAULT_OPENAI_MODEL,
-    generate_ai_reply,
-)
-
-load_dotenv()
+from bot_engine import QUICK_BUTTONS, get_bot_reply
 
 
 THEMES = {
@@ -30,7 +19,6 @@ THEMES = {
         "bg_sidebar": "#111b21",
         "bg_header": "#202c33",
         "bg_input": "#2a3942",
-        "bg_hover": "#202c33",
         "bg_active": "#2a3942",
         "bubble_out": "#005c4b",
         "bubble_in": "#202c33",
@@ -46,7 +34,6 @@ THEMES = {
         "bg_sidebar": "#ffffff",
         "bg_header": "#f0f2f5",
         "bg_input": "#ffffff",
-        "bg_hover": "#f5f6f6",
         "bg_active": "#e9edef",
         "bubble_out": "#d9fdd3",
         "bubble_in": "#ffffff",
@@ -59,156 +46,112 @@ THEMES = {
     },
 }
 
+AVATAR_COLORS = [
+    "#00a884",
+    "#2b6cb0",
+    "#805ad5",
+    "#dd6b20",
+    "#d53f8c",
+    "#319795",
+    "#c53030",
+    "#38a169",
+]
+
+# Общее серверное состояние (разделяется между всеми подключёнными пользователями)
+STATE_LOCK = threading.Lock()
+ONLINE_USERS: dict[str, dict[str, str]] = {}  # user_id -> {"id", "name", "color"}
+ROOMS_HISTORY: dict[str, list[dict[str, Any]]] = {
+    "general": [
+        {
+            "id": "welcome_general",
+            "room_id": "general",
+            "kind": "system",
+            "text": "Добро пожаловать в Общий чат! Здесь общаются все, кто сейчас на сайте.",
+            "time": datetime.datetime.now().strftime("%H:%M"),
+        }
+    ]
+}
+MAX_HISTORY_PER_ROOM = 200
+
 
 def now_hhmm() -> str:
     return datetime.datetime.now().strftime("%H:%M")
 
 
-@dataclass
-class ChatRoom:
-    id: str
-    name: str
-    avatar_text: str
-    color: str
-    is_bot: bool
-    status: str
-    system_prompt: str = ""
-    unread: int = 0
-    quick_prompts: list[str] = field(default_factory=list)
-    messages: list[dict[str, Any]] = field(default_factory=list)
+def dm_room_id(uid1: str, uid2: str) -> str:
+    a, b = sorted([uid1, uid2])
+    return f"dm:{a}:{b}"
 
 
-def create_default_chats() -> list[ChatRoom]:
-    t = now_hhmm()
-    return [
-        ChatRoom(
-            id="ai-assistant",
-            name="ИИ-Ассистент",
-            avatar_text="AI",
-            color="#00a884",
-            is_bot=True,
-            status="в сети · нейросеть",
-            system_prompt=(
-                "Ты полезный и лаконичный ИИ-ассистент внутри мессенджера PulseChat. "
-                "Отвечай по делу, структурированно и на русском языке."
-            ),
-            quick_prompts=[
-                "Придумай 5 идей для пет-проекта на Python",
-                "Объясни REST API простыми словами",
-                "Помоги составить план на день",
-            ],
-            messages=[
-                {
-                    "id": uuid.uuid4().hex,
-                    "sender": "in",
-                    "text": (
-                        "Привет! Я ИИ-бот на базе Flet. Поддерживаю GigaChat и Google Gemini. "
-                        "Напиши любой вопрос или нажми на подсказку ниже."
-                    ),
-                    "time": t,
-                    "read": True,
-                }
-            ],
-        ),
-        ChatRoom(
-            id="ai-coder",
-            name="Код-Ментор ИИ",
-            avatar_text="PY",
-            color="#2b6cb0",
-            is_bot=True,
-            status="в сети · Python / Flet",
-            system_prompt=(
-                "Ты опытный Python и Flet разработчик. Помогай с кодом, дебагом, "
-                "архитектурой и деплоем. Пиши кратко и с рабочими примерами."
-            ),
-            quick_prompts=[
-                "Как добавить SQLite к Flet-приложению?",
-                "Покажи пример асинхронного запроса через httpx",
-            ],
-            messages=[
-                {
-                    "id": uuid.uuid4().hex,
-                    "sender": "in",
-                    "text": "Привет! Помогу с Python, Flet 1.0, API и деплоем. Что разбираем?",
-                    "time": t,
-                    "read": False,
-                }
-            ],
-            unread=1,
-        ),
-        ChatRoom(
-            id="ai-support",
-            name="Бот Поддержки",
-            avatar_text="П",
-            color="#805ad5",
-            is_bot=True,
-            status="в сети · менеджер",
-            system_prompt=(
-                "Ты вежливый бот клиентской поддержки веб-студии. Помогаешь клиентам "
-                "выбрать сайт или чат-бота, уточняешь задачи и сроки."
-            ),
-            quick_prompts=[
-                "Сколько стоит разработка сайта?",
-                "Какие сроки создания чат-бота?",
-            ],
-            messages=[
-                {
-                    "id": uuid.uuid4().hex,
-                    "sender": "in",
-                    "text": "Здравствуйте! Расскажите, какой проект или бот вам нужен — помогу сориентироваться.",
-                    "time": t,
-                    "read": True,
-                }
-            ],
-        ),
-        ChatRoom(
-            id="saved-notes",
-            name="Избранное",
-            avatar_text="★",
-            color="#d69e2e",
-            is_bot=False,
-            status="личные заметки",
-            messages=[
-                {
-                    "id": uuid.uuid4().hex,
-                    "sender": "out",
-                    "text": "Здесь можно сохранять ссылки, промпты и заметки без ответов бота.",
-                    "time": t,
-                    "read": True,
-                }
-            ],
-        ),
-    ]
+def append_room_message(room_id: str, msg: dict[str, Any]) -> None:
+    with STATE_LOCK:
+        buf = ROOMS_HISTORY.setdefault(room_id, [])
+        buf.append(msg)
+        if len(buf) > MAX_HISTORY_PER_ROOM:
+            del buf[:-MAX_HISTORY_PER_ROOM]
+
+
+def get_room_history(room_id: str) -> list[dict[str, Any]]:
+    with STATE_LOCK:
+        return list(ROOMS_HISTORY.get(room_id, []))
+
+
+def get_online_snapshot() -> list[dict[str, str]]:
+    with STATE_LOCK:
+        return list(ONLINE_USERS.values())
 
 
 def main(page: ft.Page) -> None:
-    page.title = "PulseChat — Flet AI Messenger"
+    page.title = "PulseChat — Живой мессенджер"
     page.padding = 0
     page.spacing = 0
     page.theme_mode = ft.ThemeMode.DARK
 
     theme_name = "dark"
-    ai_config = AIConfig.from_env()
-    env_has_giga = bool(ai_config.gigachat_credentials)
-    env_has_gemini = bool(ai_config.gemini_api_key)
-    env_has_openai = bool(ai_config.openai_api_key)
+    user_id = "u_" + uuid.uuid4().hex[:10]
+    user_name = ""
+    user_color = AVATAR_COLORS[hash(user_id) % len(AVATAR_COLORS)]
+    joined = False
 
-    chats: list[ChatRoom] = create_default_chats()
-    active_chat_id: str = chats[0].id
-    filter_mode: str = "all"
-    search_query: str = ""
-    typing_chat_id: str | None = None
+    active_room_id = "general"  # "general" | "bot" | "saved" | "dm:..."
+    filter_mode = "all"  # "all" | "people" | "bot"
+    search_query = ""
+    mobile_show_chat = False
     reply_target: dict[str, str] | None = None
-    mobile_show_chat: bool = False
+    unread_counts: dict[str, int] = {}
+
+    # Личная история бота и избранного для текущей сессии
+    bot_messages: list[dict[str, Any]] = [
+        {
+            "id": uuid.uuid4().hex,
+            "sender_id": "bot",
+            "sender_name": "Бот-Помощник",
+            "sender_color": "#00a884",
+            "text": (
+                "Привет! Я Бот-Помощник с заготовленными ответами.\n"
+                "Нажми кнопку ниже или напиши «Помощь»."
+            ),
+            "time": now_hhmm(),
+        }
+    ]
+    bot_quick_buttons: list[str] = list(QUICK_BUTTONS)
+
+    saved_messages: list[dict[str, Any]] = [
+        {
+            "id": uuid.uuid4().hex,
+            "sender_id": user_id,
+            "sender_name": "Вы",
+            "sender_color": user_color,
+            "text": "Здесь можно сохранять личные заметки и ссылки — их видите только вы.",
+            "time": now_hhmm(),
+        }
+    ]
+
+    # Кеш известных собеседников (чтобы личный чат не пропадал, если человек вышел)
+    known_peers: dict[str, dict[str, str]] = {}
 
     def colors() -> dict[str, str]:
         return THEMES[theme_name]
-
-    def get_active_chat() -> ChatRoom:
-        for chat in chats:
-            if chat.id == active_chat_id:
-                return chat
-        return chats[0]
 
     def is_mobile() -> bool:
         return (page.width or 1024) < 760
@@ -218,6 +161,7 @@ def main(page: ft.Page) -> None:
         page.snack_bar.open = True
         page.update()
 
+    # Основные контролы
     sidebar_list = ft.ListView(expand=True, spacing=0, padding=0)
     messages_list = ft.ListView(
         expand=True,
@@ -225,10 +169,11 @@ def main(page: ft.Page) -> None:
         padding=ft.Padding.symmetric(vertical=14, horizontal=16),
         auto_scroll=True,
     )
-    quick_prompts_row = ft.Row(wrap=True, spacing=6, run_spacing=6)
+    quick_buttons_row = ft.Row(wrap=True, spacing=6, run_spacing=6)
+    filter_row = ft.Row(spacing=6)
 
     search_field = ft.TextField(
-        hint_text="Поиск чата...",
+        hint_text="Поиск чата или человека...",
         border=ft.InputBorder.NONE,
         dense=True,
         text_size=13.5,
@@ -250,6 +195,7 @@ def main(page: ft.Page) -> None:
     reply_preview_txt = ft.Text("", size=12.5, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)
     reply_bar = ft.Container(visible=False)
 
+    # Шапка активного чата
     active_avatar_txt = ft.Text("", color="#ffffff", weight=ft.FontWeight.BOLD, size=14)
     active_avatar_circle = ft.Container(
         width=40,
@@ -259,28 +205,35 @@ def main(page: ft.Page) -> None:
         content=active_avatar_txt,
     )
     active_title_txt = ft.Text("", size=15.5, weight=ft.FontWeight.W_600)
-    active_bot_badge = ft.Container(
-        content=ft.Text("AI", size=10, weight=ft.FontWeight.BOLD, color="#00a884"),
+    active_badge = ft.Container(
+        content=ft.Text("BOT", size=10, weight=ft.FontWeight.BOLD, color="#00a884"),
         padding=ft.Padding.symmetric(vertical=2, horizontal=6),
         border_radius=4,
         bgcolor="#1a00a884",
+        visible=False,
     )
     active_status_txt = ft.Text("", size=12)
-    ai_status_label = ft.Text("", size=11.5)
+
+    me_avatar_txt = ft.Text("?", color="#ffffff", weight=ft.FontWeight.BOLD, size=14)
+    me_avatar_circle = ft.Container(
+        width=36,
+        height=36,
+        border_radius=18,
+        alignment=ft.Alignment.CENTER,
+        content=me_avatar_txt,
+    )
+    me_name_txt = ft.Text("PulseChat", size=15, weight=ft.FontWeight.BOLD)
+    online_counter_txt = ft.Text("Онлайн: 0", size=11.5)
 
     back_btn = ft.IconButton(icon=ft.Icons.ARROW_BACK, tooltip="К списку чатов", visible=False)
     theme_btn = ft.IconButton(icon=ft.Icons.LIGHT_MODE, tooltip="Сменить тему")
-    new_chat_btn = ft.IconButton(icon=ft.Icons.ADD_COMMENT_OUTLINED, tooltip="Новый ИИ-чат")
-    settings_btn = ft.IconButton(icon=ft.Icons.SETTINGS_OUTLINED, tooltip="Настройки ИИ")
-    clear_chat_btn = ft.IconButton(icon=ft.Icons.DELETE_OUTLINE, tooltip="Очистить историю")
+    profile_btn = ft.IconButton(icon=ft.Icons.PERSON_OUTLINE, tooltip="Изменить имя")
     send_btn = ft.IconButton(
         icon=ft.Icons.SEND_ROUNDED,
         icon_color="#ffffff",
         bgcolor="#00a884",
         tooltip="Отправить",
     )
-
-    filter_row = ft.Row(spacing=6)
 
     def clear_reply(_=None) -> None:
         nonlocal reply_target
@@ -290,17 +243,36 @@ def main(page: ft.Page) -> None:
 
     def set_reply(msg: dict[str, Any]) -> None:
         nonlocal reply_target
-        chat = get_active_chat()
-        author = "Вы" if msg["sender"] == "out" else chat.name
-        reply_target = {"author": author, "text": msg["text"]}
+        author = "Вы" if msg.get("sender_id") == user_id else msg.get("sender_name", "Участник")
+        reply_target = {"author": author, "text": msg.get("text", "")}
         reply_author_txt.value = author
-        reply_preview_txt.value = msg["text"]
+        reply_preview_txt.value = msg.get("text", "")
         reply_bar.visible = True
         page.update()
 
+    def peer_from_dm_room(room_id: str) -> dict[str, str] | None:
+        if not room_id.startswith("dm:"):
+            return None
+        parts = room_id.split(":")
+        if len(parts) != 3:
+            return None
+        other_id = parts[2] if parts[1] == user_id else parts[1]
+        with STATE_LOCK:
+            if other_id in ONLINE_USERS:
+                return dict(ONLINE_USERS[other_id])
+        return known_peers.get(other_id)
+
+    def select_room(room_id: str) -> None:
+        nonlocal active_room_id, mobile_show_chat
+        active_room_id = room_id
+        unread_counts[room_id] = 0
+        mobile_show_chat = True
+        clear_reply()
+        render_all()
+
     def render_filters() -> None:
         c = colors()
-        items = [("all", "Все"), ("bots", "ИИ-боты"), ("personal", "Личные")]
+        items = [("all", "Все"), ("people", "Люди онлайн"), ("bot", "Бот")]
         filter_row.controls.clear()
         for key, label in items:
             selected = filter_mode == key
@@ -326,197 +298,315 @@ def main(page: ft.Page) -> None:
         render_sidebar()
         page.update()
 
-    def select_chat(chat_id: str) -> None:
-        nonlocal active_chat_id, mobile_show_chat
-        active_chat_id = chat_id
-        chat = get_active_chat()
-        chat.unread = 0
-        mobile_show_chat = True
-        clear_reply()
-        render_all()
-
-    def render_sidebar() -> None:
+    def build_sidebar_item(
+        room_id: str,
+        title: str,
+        avatar_text: str,
+        avatar_color: str,
+        preview: str,
+        time_str: str,
+        unread: int = 0,
+        tag: str = "",
+        is_online: bool = False,
+    ) -> ft.Container:
         c = colors()
-        q = search_query.strip().lower()
-        sidebar_list.controls.clear()
+        is_active = room_id == active_room_id
 
-        filtered = []
-        for chat in chats:
-            if filter_mode == "bots" and not chat.is_bot:
-                continue
-            if filter_mode == "personal" and chat.is_bot:
-                continue
-            if q:
-                in_name = q in chat.name.lower()
-                in_msg = any(q in (m.get("text") or "").lower() for m in chat.messages)
-                if not (in_name or in_msg):
-                    continue
-            filtered.append(chat)
-
-        if not filtered:
-            sidebar_list.controls.append(
+        avatar_stack = ft.Stack(
+            width=44,
+            height=44,
+            controls=[
                 ft.Container(
-                    padding=24,
+                    width=44,
+                    height=44,
+                    border_radius=22,
+                    bgcolor=avatar_color,
                     alignment=ft.Alignment.CENTER,
-                    content=ft.Text("Чаты не найдены", color=c["text_secondary"], size=13.5),
-                )
+                    content=ft.Text(avatar_text, color="#ffffff", weight=ft.FontWeight.BOLD, size=15),
+                ),
+                *(
+                    [
+                        ft.Container(
+                            width=12,
+                            height=12,
+                            border_radius=6,
+                            bgcolor="#25d366",
+                            border=ft.Border.all(2, c["bg_sidebar"]),
+                            right=0,
+                            bottom=0,
+                        )
+                    ]
+                    if is_online
+                    else []
+                ),
+            ],
+        )
+
+        badge = (
+            ft.Container(
+                content=ft.Text(str(unread), size=11, weight=ft.FontWeight.BOLD, color=c["badge_text"]),
+                bgcolor=c["accent"],
+                padding=ft.Padding.symmetric(vertical=2, horizontal=7),
+                border_radius=999,
             )
-            return
+            if unread > 0
+            else ft.Container()
+        )
 
-        for chat in filtered:
-            last = chat.messages[-1] if chat.messages else None
-            is_typing = typing_chat_id == chat.id
-            if is_typing:
-                preview = "печатает..."
-            elif last:
-                prefix = "Вы: " if last["sender"] == "out" else ""
-                preview = prefix + last["text"].replace("\n", " ")
-            else:
-                preview = "Нет сообщений"
-            last_time = last["time"] if last else ""
-            is_active = chat.id == active_chat_id
-
-            badge = (
-                ft.Container(
-                    content=ft.Text(str(chat.unread), size=11, weight=ft.FontWeight.BOLD, color=c["badge_text"]),
-                    bgcolor=c["accent"],
-                    padding=ft.Padding.symmetric(vertical=2, horizontal=7),
-                    border_radius=999,
-                )
-                if chat.unread > 0
-                else ft.Container()
-            )
-
-            sidebar_list.controls.append(
-                ft.Container(
-                    bgcolor=c["bg_active"] if is_active else None,
-                    padding=ft.Padding.symmetric(vertical=10, horizontal=12),
-                    border=ft.Border.only(bottom=ft.BorderSide(1, c["border"])),
-                    on_click=lambda e, cid=chat.id: select_chat(cid),
-                    content=ft.Row(
-                        spacing=12,
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        return ft.Container(
+            bgcolor=c["bg_active"] if is_active else None,
+            padding=ft.Padding.symmetric(vertical=10, horizontal=12),
+            border=ft.Border.only(bottom=ft.BorderSide(1, c["border"])),
+            on_click=lambda e, rid=room_id: select_room(rid),
+            content=ft.Row(
+                spacing=12,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                controls=[
+                    avatar_stack,
+                    ft.Column(
+                        expand=True,
+                        spacing=2,
                         controls=[
-                            ft.Container(
-                                width=44,
-                                height=44,
-                                border_radius=22,
-                                bgcolor=chat.color,
-                                alignment=ft.Alignment.CENTER,
-                                content=ft.Text(chat.avatar_text, color="#ffffff", weight=ft.FontWeight.BOLD, size=15),
-                            ),
-                            ft.Column(
-                                expand=True,
-                                spacing=2,
+                            ft.Row(
+                                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                                 controls=[
                                     ft.Row(
-                                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                                        controls=[
-                                            ft.Row(
-                                                spacing=6,
-                                                controls=[
-                                                    ft.Text(
-                                                        chat.name,
-                                                        size=14.5,
-                                                        weight=ft.FontWeight.W_600,
-                                                        color=c["text_primary"],
-                                                        max_lines=1,
-                                                        overflow=ft.TextOverflow.ELLIPSIS,
-                                                    ),
-                                                    *(
-                                                        [
-                                                            ft.Container(
-                                                                content=ft.Text("AI", size=9.5, weight=ft.FontWeight.BOLD, color=c["accent"]),
-                                                                bgcolor="#1f00a884",
-                                                                padding=ft.Padding.symmetric(vertical=1, horizontal=5),
-                                                                border_radius=4,
-                                                            )
-                                                        ]
-                                                        if chat.is_bot
-                                                        else []
-                                                    ),
-                                                ],
-                                            ),
-                                            ft.Text(last_time, size=11.5, color=c["text_secondary"]),
-                                        ],
-                                    ),
-                                    ft.Row(
-                                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                                        spacing=6,
                                         controls=[
                                             ft.Text(
-                                                preview,
-                                                size=12.8,
-                                                color=c["accent"] if is_typing else c["text_secondary"],
+                                                title,
+                                                size=14.5,
+                                                weight=ft.FontWeight.W_600,
+                                                color=c["text_primary"],
                                                 max_lines=1,
                                                 overflow=ft.TextOverflow.ELLIPSIS,
-                                                expand=True,
                                             ),
-                                            badge,
+                                            *(
+                                                [
+                                                    ft.Container(
+                                                        content=ft.Text(tag, size=9.5, weight=ft.FontWeight.BOLD, color=c["accent"]),
+                                                        bgcolor="#1f00a884",
+                                                        padding=ft.Padding.symmetric(vertical=1, horizontal=5),
+                                                        border_radius=4,
+                                                    )
+                                                ]
+                                                if tag
+                                                else []
+                                            ),
                                         ],
                                     ),
+                                    ft.Text(time_str, size=11.5, color=c["text_secondary"]),
+                                ],
+                            ),
+                            ft.Row(
+                                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                                controls=[
+                                    ft.Text(
+                                        preview,
+                                        size=12.8,
+                                        color=c["text_secondary"],
+                                        max_lines=1,
+                                        overflow=ft.TextOverflow.ELLIPSIS,
+                                        expand=True,
+                                    ),
+                                    badge,
                                 ],
                             ),
                         ],
                     ),
+                ],
+            ),
+        )
+
+    def render_sidebar() -> None:
+        c = colors()
+        q = search_query.strip().lower()
+        online_all = get_online_snapshot()
+        other_users = [u for u in online_all if u["id"] != user_id]
+        for u in other_users:
+            known_peers[u["id"]] = u
+
+        online_counter_txt.value = f"Онлайн на сайте: {len(online_all)}"
+        online_counter_txt.color = c["accent"]
+
+        sidebar_list.controls.clear()
+
+        # 1. Общий чат
+        if filter_mode in {"all", "people"}:
+            gen_hist = get_room_history("general")
+            last_gen = gen_hist[-1] if gen_hist else None
+            gen_preview = last_gen["text"].replace("\n", " ") if last_gen else "Напишите первым!"
+            if last_gen and last_gen.get("kind") != "system":
+                who = "Вы" if last_gen.get("sender_id") == user_id else last_gen.get("sender_name", "")
+                gen_preview = f"{who}: {gen_preview}"
+            if not q or q in "общий чат" or q in gen_preview.lower():
+                sidebar_list.controls.append(
+                    build_sidebar_item(
+                        room_id="general",
+                        title="Общий чат",
+                        avatar_text="🌐",
+                        avatar_color="#00a884",
+                        preview=gen_preview,
+                        time_str=last_gen["time"] if last_gen else "",
+                        unread=unread_counts.get("general", 0),
+                        tag=f"{len(online_all)} онлайн",
+                    )
+                )
+
+        # 2. Бот-Помощник (с заготовленными сообщениями)
+        if filter_mode in {"all", "bot"}:
+            last_bot = bot_messages[-1] if bot_messages else None
+            bot_preview = last_bot["text"].replace("\n", " ") if last_bot else "Напишите боту"
+            if not q or q in "бот помощник" or q in bot_preview.lower():
+                sidebar_list.controls.append(
+                    build_sidebar_item(
+                        room_id="bot",
+                        title="Бот-Помощник",
+                        avatar_text="🤖",
+                        avatar_color="#2b6cb0",
+                        preview=bot_preview,
+                        time_str=last_bot["time"] if last_bot else "",
+                        unread=unread_counts.get("bot", 0),
+                        tag="BOT",
+                        is_online=True,
+                    )
+                )
+
+        # 3. Избранное
+        if filter_mode == "all":
+            last_saved = saved_messages[-1] if saved_messages else None
+            saved_preview = last_saved["text"].replace("\n", " ") if last_saved else "Личные заметки"
+            if not q or q in "избранное заметки" or q in saved_preview.lower():
+                sidebar_list.controls.append(
+                    build_sidebar_item(
+                        room_id="saved",
+                        title="Избранное",
+                        avatar_text="★",
+                        avatar_color="#805ad5",
+                        preview=saved_preview,
+                        time_str=last_saved["time"] if last_saved else "",
+                    )
+                )
+
+        # 4. Люди на сайте (личные чаты 1-на-1)
+        if filter_mode in {"all", "people"}:
+            sidebar_list.controls.append(
+                ft.Container(
+                    padding=ft.Padding.only(left=14, right=14, top=12, bottom=6),
+                    content=ft.Text(
+                        f"ЛЮДИ НА САЙТЕ ({len(other_users)})",
+                        size=11,
+                        weight=ft.FontWeight.W_600,
+                        color=c["text_secondary"],
+                    ),
                 )
             )
+            if not other_users:
+                sidebar_list.controls.append(
+                    ft.Container(
+                        padding=ft.Padding.symmetric(vertical=10, horizontal=14),
+                        content=ft.Text(
+                            "Пока вы один на сайте. Откройте ссылку во второй вкладке или отправьте другу — собеседник сразу появится здесь.",
+                            size=12.5,
+                            color=c["text_secondary"],
+                        ),
+                    )
+                )
+            else:
+                for peer in other_users:
+                    rid = dm_room_id(user_id, peer["id"])
+                    hist = get_room_history(rid)
+                    last_m = hist[-1] if hist else None
+                    prev = "Нажмите, чтобы написать в личку"
+                    if last_m:
+                        who = "Вы: " if last_m.get("sender_id") == user_id else ""
+                        prev = who + last_m["text"].replace("\n", " ")
+                    if q and q not in peer["name"].lower() and q not in prev.lower():
+                        continue
+                    sidebar_list.controls.append(
+                        build_sidebar_item(
+                            room_id=rid,
+                            title=peer["name"],
+                            avatar_text=peer["name"][:2].upper(),
+                            avatar_color=peer["color"],
+                            preview=prev,
+                            time_str=last_m["time"] if last_m else "",
+                            unread=unread_counts.get(rid, 0),
+                            is_online=True,
+                        )
+                    )
 
     def render_header() -> None:
         c = colors()
-        chat = get_active_chat()
-        active_avatar_txt.value = chat.avatar_text
-        active_avatar_circle.bgcolor = chat.color
-        active_title_txt.value = chat.name
-        active_title_txt.color = c["text_primary"]
-        active_bot_badge.visible = chat.is_bot
+        me_avatar_txt.value = (user_name[:1].upper() if user_name else "?")
+        me_avatar_circle.bgcolor = user_color
+        me_name_txt.value = user_name or "PulseChat"
+        me_name_txt.color = c["text_primary"]
 
-        provider = ai_config.resolved_provider()
-        if typing_chat_id == chat.id:
-            active_status_txt.value = "печатает..."
+        online_all = get_online_snapshot()
+
+        if active_room_id == "general":
+            active_avatar_txt.value = "🌐"
+            active_avatar_circle.bgcolor = "#00a884"
+            active_title_txt.value = "Общий чат"
+            active_badge.visible = False
+            active_status_txt.value = f"участников онлайн: {len(online_all)}"
             active_status_txt.color = c["accent"]
-        elif chat.is_bot:
-            if provider == "gigachat":
-                active_status_txt.value = f"в сети · {ai_config.gigachat_model}"
-            elif provider == "gemini":
-                active_status_txt.value = f"в сети · {ai_config.gemini_model}"
-            elif provider == "openai":
-                active_status_txt.value = f"в сети · {ai_config.openai_model}"
-            else:
-                active_status_txt.value = "в сети · добавьте ключ ИИ в настройках"
+        elif active_room_id == "bot":
+            active_avatar_txt.value = "🤖"
+            active_avatar_circle.bgcolor = "#2b6cb0"
+            active_title_txt.value = "Бот-Помощник"
+            active_badge.visible = True
+            active_status_txt.value = "в сети · быстрые команды"
             active_status_txt.color = c["accent"]
-        else:
-            active_status_txt.value = chat.status
+        elif active_room_id == "saved":
+            active_avatar_txt.value = "★"
+            active_avatar_circle.bgcolor = "#805ad5"
+            active_title_txt.value = "Избранное"
+            active_badge.visible = False
+            active_status_txt.value = "личные заметки"
             active_status_txt.color = c["text_secondary"]
-
-        if provider == "gigachat":
-            ai_status_label.value = f"GigaChat · {ai_config.gigachat_model}"
-            ai_status_label.color = c["accent"]
-        elif provider == "gemini":
-            ai_status_label.value = f"Gemini · {ai_config.gemini_model}"
-            ai_status_label.color = c["accent"]
-        elif provider == "openai":
-            ai_status_label.value = f"AI · {ai_config.openai_model}"
-            ai_status_label.color = c["accent"]
         else:
-            ai_status_label.value = "ИИ: без ключа"
-            ai_status_label.color = c["text_secondary"]
+            peer = peer_from_dm_room(active_room_id)
+            online_ids = {u["id"] for u in online_all}
+            if peer:
+                active_avatar_txt.value = peer["name"][:2].upper()
+                active_avatar_circle.bgcolor = peer["color"]
+                active_title_txt.value = peer["name"]
+                active_badge.visible = False
+                if peer["id"] in online_ids:
+                    active_status_txt.value = "в сети · личный чат"
+                    active_status_txt.color = c["accent"]
+                else:
+                    active_status_txt.value = "не в сети"
+                    active_status_txt.color = c["text_secondary"]
+            else:
+                active_avatar_txt.value = "?"
+                active_avatar_circle.bgcolor = "#667781"
+                active_title_txt.value = "Личный чат"
+                active_badge.visible = False
+                active_status_txt.value = "собеседник вышел"
+                active_status_txt.color = c["text_secondary"]
+
+        active_title_txt.color = c["text_primary"]
 
     async def copy_message_text(text: str) -> None:
         try:
             await ft.Clipboard().set(text)
-            show_snack("Скопировано в буфер обмена")
+            show_snack("Скопировано")
         except Exception:
             show_snack("Не удалось скопировать")
 
-    def delete_message(msg_id: str) -> None:
-        chat = get_active_chat()
-        chat.messages = [m for m in chat.messages if m["id"] != msg_id]
-        render_all()
-
     def render_messages() -> None:
         c = colors()
-        chat = get_active_chat()
         messages_list.controls.clear()
+
+        if active_room_id == "bot":
+            msgs = bot_messages
+        elif active_room_id == "saved":
+            msgs = saved_messages
+        else:
+            msgs = get_room_history(active_room_id)
 
         messages_list.controls.append(
             ft.Row(
@@ -532,8 +622,43 @@ def main(page: ft.Page) -> None:
             )
         )
 
-        for msg in chat.messages:
-            is_out = msg["sender"] == "out"
+        if not msgs and active_room_id.startswith("dm:"):
+            messages_list.controls.append(
+                ft.Row(
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    controls=[
+                        ft.Container(
+                            content=ft.Text(
+                                "Это начало личной переписки. Напишите привет!",
+                                size=12.5,
+                                color=c["text_secondary"],
+                            ),
+                            bgcolor=c["bg_header"],
+                            padding=ft.Padding.symmetric(vertical=6, horizontal=14),
+                            border_radius=10,
+                        )
+                    ],
+                )
+            )
+
+        for msg in msgs:
+            if msg.get("kind") == "system":
+                messages_list.controls.append(
+                    ft.Row(
+                        alignment=ft.MainAxisAlignment.CENTER,
+                        controls=[
+                            ft.Container(
+                                content=ft.Text(msg["text"], size=12, color=c["text_secondary"]),
+                                bgcolor=c["bg_header"],
+                                padding=ft.Padding.symmetric(vertical=4, horizontal=12),
+                                border_radius=8,
+                            )
+                        ],
+                    )
+                )
+                continue
+
+            is_out = msg.get("sender_id") == user_id
             bubble_bg = c["bubble_out"] if is_out else c["bubble_in"]
             radius = (
                 ft.BorderRadius.only(top_left=12, top_right=2, bottom_left=12, bottom_right=12)
@@ -542,6 +667,17 @@ def main(page: ft.Page) -> None:
             )
 
             inner_controls: list[ft.Control] = []
+
+            # В общем чате показываем имя отправителя
+            if active_room_id == "general" and not is_out:
+                inner_controls.append(
+                    ft.Text(
+                        msg.get("sender_name", "Гость"),
+                        size=12,
+                        weight=ft.FontWeight.W_600,
+                        color=msg.get("sender_color", c["accent"]),
+                    )
+                )
 
             if msg.get("reply_to"):
                 rt = msg["reply_to"]
@@ -568,25 +704,14 @@ def main(page: ft.Page) -> None:
                 )
 
             inner_controls.append(
-                ft.Text(
-                    msg["text"],
-                    size=14.2,
-                    color=c["text_primary"],
-                    selectable=True,
-                )
+                ft.Text(msg.get("text", ""), size=14.2, color=c["text_primary"], selectable=True)
             )
 
             meta_items: list[ft.Control] = [
-                ft.Text(msg["time"], size=11, color=c["text_secondary"]),
+                ft.Text(msg.get("time", ""), size=11, color=c["text_secondary"]),
             ]
             if is_out:
-                meta_items.append(
-                    ft.Icon(
-                        icon=ft.Icons.DONE_ALL,
-                        size=15,
-                        color=c["check_read"] if msg.get("read") else c["text_secondary"],
-                    )
-                )
+                meta_items.append(ft.Icon(icon=ft.Icons.DONE_ALL, size=15, color=c["check_read"]))
 
             action_menu = ft.PopupMenuButton(
                 icon=ft.Icons.MORE_HORIZ,
@@ -597,18 +722,13 @@ def main(page: ft.Page) -> None:
                     ft.PopupMenuItem(content="Ответить", on_click=lambda e, m=msg: set_reply(m)),
                     ft.PopupMenuItem(
                         content="Копировать",
-                        on_click=lambda e, txt=msg["text"]: page.run_task(copy_message_text, txt),
+                        on_click=lambda e, txt=msg.get("text", ""): page.run_task(copy_message_text, txt),
                     ),
-                    ft.PopupMenuItem(content="Удалить", on_click=lambda e, mid=msg["id"]: delete_message(mid)),
                 ],
             )
 
             inner_controls.append(
-                ft.Row(
-                    alignment=ft.MainAxisAlignment.END,
-                    spacing=4,
-                    controls=[action_menu, *meta_items],
-                )
+                ft.Row(alignment=ft.MainAxisAlignment.END, spacing=4, controls=[action_menu, *meta_items])
             )
 
             bubble = ft.Container(
@@ -626,279 +746,168 @@ def main(page: ft.Page) -> None:
                 )
             )
 
-        if typing_chat_id == chat.id:
-            messages_list.controls.append(
-                ft.Row(
-                    alignment=ft.MainAxisAlignment.START,
-                    controls=[
-                        ft.Container(
-                            bgcolor=c["bubble_in"],
-                            border_radius=12,
-                            padding=ft.Padding.symmetric(vertical=8, horizontal=12),
-                            content=ft.Row(
-                                spacing=8,
-                                tight=True,
-                                controls=[
-                                    ft.ProgressRing(width=14, height=14, stroke_width=2, color=c["accent"]),
-                                    ft.Text("ИИ печатает...", size=13, color=c["text_secondary"]),
-                                ],
-                            ),
-                        )
-                    ],
-                )
-            )
-
-        quick_prompts_row.controls.clear()
-        if chat.is_bot and chat.quick_prompts and typing_chat_id != chat.id:
-            for prompt in chat.quick_prompts:
-                quick_prompts_row.controls.append(
+        # Быстрые кнопки для чат-бота с заготовленными сообщениями
+        quick_buttons_row.controls.clear()
+        if active_room_id == "bot":
+            for label in bot_quick_buttons:
+                quick_buttons_row.controls.append(
                     ft.Container(
-                        content=ft.Text(prompt, size=12.5, color=c["accent"]),
+                        content=ft.Text(label, size=12.5, color=c["accent"]),
                         bgcolor=c["bg_header"],
                         border=ft.Border.all(1, c["border"]),
                         border_radius=999,
                         padding=ft.Padding.symmetric(vertical=6, horizontal=11),
-                        on_click=lambda e, p=prompt: page.run_task(send_message_async, p),
+                        on_click=lambda e, txt=label: send_message(txt),
                     )
                 )
 
-    async def send_message_async(custom_text: str | None = None) -> None:
-        nonlocal typing_chat_id
-        chat = get_active_chat()
+    def send_message(custom_text: str | None = None) -> None:
+        nonlocal bot_quick_buttons
+        if not joined:
+            return
         text = (custom_text if custom_text is not None else (msg_input.value or "")).strip()
         if not text:
             return
-
         if custom_text is None:
             msg_input.value = ""
 
-        out_msg: dict[str, Any] = {
+        msg: dict[str, Any] = {
             "id": uuid.uuid4().hex,
-            "sender": "out",
+            "room_id": active_room_id,
+            "kind": "chat",
+            "sender_id": user_id,
+            "sender_name": user_name,
+            "sender_color": user_color,
             "text": text,
             "time": now_hhmm(),
-            "read": not chat.is_bot,
         }
         if reply_target:
-            out_msg["reply_to"] = dict(reply_target)
+            msg["reply_to"] = dict(reply_target)
             clear_reply()
 
-        chat.messages.append(out_msg)
-        render_all()
-
-        if not chat.is_bot:
+        if active_room_id == "saved":
+            saved_messages.append(msg)
+            render_all()
             return
 
-        typing_chat_id = chat.id
-        render_all()
-
-        reply_text, _source = await generate_ai_reply(
-            config=ai_config,
-            system_prompt=chat.system_prompt or f"Ты полезный ИИ-ассистент {chat.name}.",
-            history=chat.messages,
-            user_text=text,
-        )
-
-        typing_chat_id = None
-        for m in chat.messages:
-            if m["sender"] == "out":
-                m["read"] = True
-
-        chat.messages.append(
-            {
-                "id": uuid.uuid4().hex,
-                "sender": "in",
-                "text": reply_text,
-                "time": now_hhmm(),
-                "read": active_chat_id == chat.id,
-            }
-        )
-        if active_chat_id != chat.id:
-            chat.unread += 1
-
-        render_all()
-
-    def open_new_chat_dialog(_=None) -> None:
-        name_tf = ft.TextField(label="Имя бота или название чата", hint_text="Например: Маркетолог ИИ")
-        is_bot_sw = ft.Switch(label="Это ИИ-чат-бот", value=True)
-        prompt_tf = ft.TextField(
-            label="Системный промпт (роль ИИ)",
-            multiline=True,
-            min_lines=2,
-            max_lines=4,
-            value="Ты полезный ИИ-ассистент. Отвечай кратко и по делу на русском языке.",
-        )
-
-        def create_chat(_e) -> None:
-            nonlocal active_chat_id, mobile_show_chat
-            name = (name_tf.value or "").strip()
-            if not name:
-                show_snack("Введите название чата")
-                return
-            palette = ["#00a884", "#2b6cb0", "#805ad5", "#dd6b20", "#d53f8c", "#319795"]
-            is_bot = bool(is_bot_sw.value)
-            new_room = ChatRoom(
-                id="chat_" + uuid.uuid4().hex[:8],
-                name=name,
-                avatar_text=name[:2].upper(),
-                color=palette[len(chats) % len(palette)],
-                is_bot=is_bot,
-                status="в сети · ИИ-бот" if is_bot else "личные заметки",
-                system_prompt=(prompt_tf.value or "").strip(),
-                messages=(
-                    [
-                        {
-                            "id": uuid.uuid4().hex,
-                            "sender": "in",
-                            "text": f"Привет! Я {name}. Чем могу помочь?",
-                            "time": now_hhmm(),
-                            "read": True,
-                        }
-                    ]
-                    if is_bot
-                    else []
-                ),
+        if active_room_id == "bot":
+            bot_messages.append(msg)
+            online_names = [u["name"] for u in get_online_snapshot()]
+            reply_text, next_buttons = get_bot_reply(text, online_names)
+            bot_quick_buttons = next_buttons
+            bot_messages.append(
+                {
+                    "id": uuid.uuid4().hex,
+                    "room_id": "bot",
+                    "kind": "chat",
+                    "sender_id": "bot",
+                    "sender_name": "Бот-Помощник",
+                    "sender_color": "#2b6cb0",
+                    "text": reply_text,
+                    "time": now_hhmm(),
+                }
             )
-            chats.insert(0, new_room)
-            active_chat_id = new_room.id
-            mobile_show_chat = True
-            page.pop_dialog()
             render_all()
-            show_snack(f"Чат «{name}» создан")
+            return
+
+        # Общий чат или личный чат с другим пользователем — рассылаем в реальном времени!
+        append_room_message(active_room_id, msg)
+        page.pubsub.send_all({"type": "message", "room_id": active_room_id, "message": msg})
+
+    # PubSub: получение живых событий от других посетителей сайта
+    def on_pubsub_event(event: dict[str, Any]) -> None:
+        if not joined:
+            return
+        ev_type = event.get("type")
+
+        if ev_type == "presence":
+            render_sidebar()
+            render_header()
+            page.update()
+            return
+
+        if ev_type == "message":
+            room_id = event.get("room_id", "")
+            msg = event.get("message") or {}
+
+            # Личные сообщения доставляем только двум участникам этой комнаты
+            if room_id.startswith("dm:"):
+                parts = room_id.split(":")
+                if user_id not in parts[1:]:
+                    return
+                if msg.get("sender_id") != user_id:
+                    known_peers[msg["sender_id"]] = {
+                        "id": msg["sender_id"],
+                        "name": msg.get("sender_name", "Гость"),
+                        "color": msg.get("sender_color", "#00a884"),
+                    }
+
+            if room_id != active_room_id and msg.get("sender_id") != user_id and msg.get("kind") != "system":
+                unread_counts[room_id] = unread_counts.get(room_id, 0) + 1
+
+            render_all()
+
+    page.pubsub.subscribe(on_pubsub_event)
+
+    def broadcast_system_general(text: str) -> None:
+        sys_msg = {
+            "id": uuid.uuid4().hex,
+            "room_id": "general",
+            "kind": "system",
+            "text": text,
+            "time": now_hhmm(),
+        }
+        append_room_message("general", sys_msg)
+        page.pubsub.send_all({"type": "message", "room_id": "general", "message": sys_msg})
+
+    def on_disconnect(_e) -> None:
+        if not joined:
+            return
+        removed_name = ""
+        with STATE_LOCK:
+            info = ONLINE_USERS.pop(user_id, None)
+            if info:
+                removed_name = info["name"]
+        try:
+            page.pubsub.unsubscribe_all()
+        except Exception:
+            pass
+        if removed_name:
+            broadcast_system_general(f"{removed_name} вышел из чата")
+            page.pubsub.send_all({"type": "presence"})
+
+    page.on_disconnect = on_disconnect
+
+    # Диалог смены имени
+    def open_profile_dialog(_=None) -> None:
+        name_tf = ft.TextField(label="Ваше имя в чате", value=user_name, max_length=24)
+
+        def save_name(_e) -> None:
+            nonlocal user_name
+            new_name = (name_tf.value or "").strip()
+            if not new_name:
+                show_snack("Имя не может быть пустым")
+                return
+            old_name = user_name
+            user_name = new_name
+            with STATE_LOCK:
+                if user_id in ONLINE_USERS:
+                    ONLINE_USERS[user_id]["name"] = user_name
+            page.pop_dialog()
+            if old_name != new_name:
+                broadcast_system_general(f"{old_name} сменил имя на {new_name}")
+            page.pubsub.send_all({"type": "presence"})
+            render_all()
 
         dlg = ft.AlertDialog(
-            title=ft.Text("Новый чат / ИИ-бот"),
-            content=ft.Container(
-                width=380,
-                content=ft.Column(tight=True, spacing=10, controls=[name_tf, is_bot_sw, prompt_tf]),
-            ),
+            title=ft.Text("Ваш профиль"),
+            content=ft.Container(width=340, content=name_tf),
             actions=[
                 ft.TextButton(content="Отмена", on_click=lambda _: page.pop_dialog()),
-                ft.Button(content="Создать", on_click=create_chat),
+                ft.Button(content="Сохранить", on_click=save_name),
             ],
         )
         page.show_dialog(dlg)
-
-    def open_settings_dialog(_=None) -> None:
-        provider_dd = ft.Dropdown(
-            label="Провайдер ИИ",
-            value=ai_config.provider,
-            options=[
-                ft.dropdown.Option("auto", "Авто (GigaChat → Gemini → OpenAI)"),
-                ft.dropdown.Option("gigachat", "GigaChat API (Сбер)"),
-                ft.dropdown.Option("gemini", "Google Gemini / Vertex Express"),
-                ft.dropdown.Option("openai", "OpenAI-совместимый API"),
-            ],
-        )
-        giga_creds_tf = ft.TextField(
-            label="GIGACHAT_CREDENTIALS (Authorization key)",
-            password=True,
-            can_reveal_password=True,
-            value="" if env_has_giga else ai_config.gigachat_credentials,
-            hint_text="Задан через переменную окружения" if env_has_giga else "Base64 ключ из GigaChat Studio",
-        )
-        giga_scope_dd = ft.Dropdown(
-            label="GigaChat Scope",
-            value=ai_config.gigachat_scope or DEFAULT_GIGACHAT_SCOPE,
-            options=[
-                ft.dropdown.Option("GIGACHAT_API_PERS", "GIGACHAT_API_PERS (Физлица)"),
-                ft.dropdown.Option("GIGACHAT_API_B2B", "GIGACHAT_API_B2B (Бизнес)"),
-                ft.dropdown.Option("GIGACHAT_API_CORP", "GIGACHAT_API_CORP (Корпоративный)"),
-            ],
-        )
-        giga_model_dd = ft.Dropdown(
-            label="Модель GigaChat",
-            value=ai_config.gigachat_model or DEFAULT_GIGACHAT_MODEL,
-            options=[
-                ft.dropdown.Option("GigaChat-2", "GigaChat-2"),
-                ft.dropdown.Option("GigaChat-2-Pro", "GigaChat-2-Pro"),
-                ft.dropdown.Option("GigaChat-2-Max", "GigaChat-2-Max"),
-                ft.dropdown.Option("GigaChat", "GigaChat"),
-            ],
-        )
-        gemini_key_tf = ft.TextField(
-            label="GEMINI_API_KEY (AI Studio или Vertex AQ.)",
-            password=True,
-            can_reveal_password=True,
-            value="" if env_has_gemini else ai_config.gemini_api_key,
-            hint_text="Задан через переменную окружения" if env_has_gemini else "AIza... или AQ....",
-        )
-        gemini_model_tf = ft.TextField(
-            label="Модель Gemini",
-            value=ai_config.gemini_model or DEFAULT_GEMINI_MODEL,
-        )
-        openai_url_tf = ft.TextField(
-            label="OpenAI-совместимый Base URL",
-            value=ai_config.openai_base_url or DEFAULT_OPENAI_BASE_URL,
-        )
-        openai_key_tf = ft.TextField(
-            label="AI_API_KEY",
-            password=True,
-            can_reveal_password=True,
-            value="" if env_has_openai else ai_config.openai_api_key,
-            hint_text="Задан через переменную окружения" if env_has_openai else "sk-...",
-        )
-        openai_model_tf = ft.TextField(
-            label="Модель OpenAI-совместимого API",
-            value=ai_config.openai_model or DEFAULT_OPENAI_MODEL,
-        )
-
-        def save_settings(_e) -> None:
-            ai_config.provider = provider_dd.value or "auto"
-            if (giga_creds_tf.value or "").strip():
-                ai_config.gigachat_credentials = giga_creds_tf.value.strip()
-            ai_config.gigachat_scope = giga_scope_dd.value or DEFAULT_GIGACHAT_SCOPE
-            ai_config.gigachat_model = giga_model_dd.value or DEFAULT_GIGACHAT_MODEL
-            ai_config.invalidate_giga_token()
-
-            if (gemini_key_tf.value or "").strip():
-                ai_config.gemini_api_key = gemini_key_tf.value.strip()
-            ai_config.gemini_model = (gemini_model_tf.value or DEFAULT_GEMINI_MODEL).strip()
-
-            ai_config.openai_base_url = (openai_url_tf.value or DEFAULT_OPENAI_BASE_URL).strip()
-            if (openai_key_tf.value or "").strip():
-                ai_config.openai_api_key = openai_key_tf.value.strip()
-            ai_config.openai_model = (openai_model_tf.value or DEFAULT_OPENAI_MODEL).strip()
-
-            page.pop_dialog()
-            render_all()
-            show_snack("Настройки ИИ сохранены")
-
-        dlg = ft.AlertDialog(
-            title=ft.Text("Настройки ИИ"),
-            content=ft.Container(
-                width=430,
-                height=440,
-                content=ft.Column(
-                    scroll=ft.ScrollMode.AUTO,
-                    spacing=10,
-                    controls=[
-                        provider_dd,
-                        giga_creds_tf,
-                        giga_scope_dd,
-                        giga_model_dd,
-                        ft.Divider(height=8),
-                        gemini_key_tf,
-                        gemini_model_tf,
-                        ft.Divider(height=8),
-                        openai_url_tf,
-                        openai_key_tf,
-                        openai_model_tf,
-                    ],
-                ),
-            ),
-            actions=[
-                ft.TextButton(content="Отмена", on_click=lambda _: page.pop_dialog()),
-                ft.Button(content="Сохранить", on_click=save_settings),
-            ],
-        )
-        page.show_dialog(dlg)
-
-    def clear_active_chat(_=None) -> None:
-        chat = get_active_chat()
-        chat.messages.clear()
-        render_all()
-        show_snack("История чата очищена")
 
     def toggle_theme(_=None) -> None:
         nonlocal theme_name
@@ -920,12 +929,10 @@ def main(page: ft.Page) -> None:
         page.update()
 
     search_field.on_change = on_search_change
-    msg_input.on_submit = lambda e: page.run_task(send_message_async)
-    send_btn.on_click = lambda e: page.run_task(send_message_async)
+    msg_input.on_submit = lambda e: send_message()
+    send_btn.on_click = lambda e: send_message()
     theme_btn.on_click = toggle_theme
-    new_chat_btn.on_click = open_new_chat_dialog
-    settings_btn.on_click = open_settings_dialog
-    clear_chat_btn.on_click = clear_active_chat
+    profile_btn.on_click = open_profile_dialog
     back_btn.on_click = on_mobile_back
 
     sidebar_header = ft.Container(height=60, padding=ft.Padding.symmetric(horizontal=12))
@@ -933,7 +940,7 @@ def main(page: ft.Page) -> None:
     sidebar_panel = ft.Container(width=340)
 
     chat_header = ft.Container(height=60, padding=ft.Padding.symmetric(horizontal=12))
-    quick_bar = ft.Container(padding=ft.Padding.symmetric(vertical=4, horizontal=16), content=quick_prompts_row)
+    quick_bar = ft.Container(padding=ft.Padding.symmetric(vertical=4, horizontal=16), content=quick_buttons_row)
     composer_box = ft.Container(
         border_radius=12,
         padding=ft.Padding.symmetric(vertical=2, horizontal=12),
@@ -956,25 +963,15 @@ def main(page: ft.Page) -> None:
                 ft.Row(
                     spacing=10,
                     controls=[
-                        ft.Container(
-                            width=36,
-                            height=36,
-                            border_radius=18,
-                            bgcolor=c["accent"],
-                            alignment=ft.Alignment.CENTER,
-                            content=ft.Text("P", color="#ffffff", weight=ft.FontWeight.BOLD),
-                        ),
+                        me_avatar_circle,
                         ft.Column(
                             spacing=0,
                             alignment=ft.MainAxisAlignment.CENTER,
-                            controls=[
-                                ft.Text("PulseChat", size=15, weight=ft.FontWeight.BOLD, color=c["text_primary"]),
-                                ai_status_label,
-                            ],
+                            controls=[me_name_txt, online_counter_txt],
                         ),
                     ],
                 ),
-                ft.Row(spacing=0, controls=[new_chat_btn, theme_btn, settings_btn]),
+                ft.Row(spacing=0, controls=[theme_btn, profile_btn]),
             ],
         )
 
@@ -1021,13 +1018,12 @@ def main(page: ft.Page) -> None:
                             spacing=1,
                             alignment=ft.MainAxisAlignment.CENTER,
                             controls=[
-                                ft.Row(spacing=6, controls=[active_title_txt, active_bot_badge]),
+                                ft.Row(spacing=6, controls=[active_title_txt, active_badge]),
                                 active_status_txt,
                             ],
                         ),
                     ],
                 ),
-                clear_chat_btn,
             ],
         )
 
@@ -1095,13 +1091,115 @@ def main(page: ft.Page) -> None:
         page.update()
 
     def on_resize(_e) -> None:
-        apply_layout()
-        render_messages()
-        page.update()
+        if joined:
+            apply_layout()
+            render_messages()
+            page.update()
 
     page.on_resize = on_resize
-    page.add(root_row)
-    render_all()
+
+    # Экран входа (выбор имени и цвета аватара)
+    selected_color_ref = [user_color]
+    name_input = ft.TextField(
+        label="Ваше имя",
+        hint_text="Например: Максим",
+        autofocus=True,
+        max_length=24,
+    )
+    color_row = ft.Row(spacing=8, alignment=ft.MainAxisAlignment.CENTER)
+
+    def render_color_picker() -> None:
+        color_row.controls.clear()
+        for col in AVATAR_COLORS:
+            picked = col == selected_color_ref[0]
+            color_row.controls.append(
+                ft.Container(
+                    width=28,
+                    height=28,
+                    border_radius=14,
+                    bgcolor=col,
+                    border=ft.Border.all(2.5, "#ffffff") if picked else None,
+                    on_click=lambda e, cl=col: pick_color(cl),
+                )
+            )
+
+    def pick_color(col: str) -> None:
+        selected_color_ref[0] = col
+        render_color_picker()
+        page.update()
+
+    def enter_chat(_e=None) -> None:
+        nonlocal user_name, user_color, joined
+        entered = (name_input.value or "").strip()
+        if not entered:
+            show_snack("Введите ваше имя, чтобы зайти в чат")
+            return
+        user_name = entered
+        user_color = selected_color_ref[0]
+        joined = True
+
+        with STATE_LOCK:
+            ONLINE_USERS[user_id] = {"id": user_id, "name": user_name, "color": user_color}
+
+        page.controls.clear()
+        page.add(root_row)
+        render_all()
+
+        broadcast_system_general(f"{user_name} присоединился к чату")
+        page.pubsub.send_all({"type": "presence"})
+
+    name_input.on_submit = enter_chat
+    render_color_picker()
+
+    c = colors()
+    page.bgcolor = c["bg_app"]
+    login_card = ft.Container(
+        width=360,
+        padding=24,
+        border_radius=16,
+        bgcolor=c["bg_sidebar"],
+        border=ft.Border.all(1, c["border"]),
+        content=ft.Column(
+            tight=True,
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=14,
+            controls=[
+                ft.Container(
+                    width=56,
+                    height=56,
+                    border_radius=28,
+                    bgcolor=c["accent"],
+                    alignment=ft.Alignment.CENTER,
+                    content=ft.Icon(icon=ft.Icons.CHAT_ROUNDED, color="#ffffff", size=28),
+                ),
+                ft.Text("PulseChat", size=22, weight=ft.FontWeight.BOLD, color=c["text_primary"]),
+                ft.Text(
+                    f"Живой мессенджер для общения на сайте · сейчас онлайн: {len(get_online_snapshot())}",
+                    size=13,
+                    color=c["text_secondary"],
+                    text_align=ft.TextAlign.CENTER,
+                ),
+                name_input,
+                ft.Text("Цвет аватара:", size=12, color=c["text_secondary"]),
+                color_row,
+                ft.Button(
+                    content="Войти в мессенджер",
+                    width=312,
+                    height=44,
+                    on_click=enter_chat,
+                ),
+            ],
+        ),
+    )
+
+    page.add(
+        ft.Container(
+            expand=True,
+            alignment=ft.Alignment.CENTER,
+            padding=16,
+            content=login_card,
+        )
+    )
 
 
 if __name__ == "__main__":

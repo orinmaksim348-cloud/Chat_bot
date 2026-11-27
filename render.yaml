@@ -8,11 +8,3 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.7
-      - key: GIGACHAT_CREDENTIALS
-        sync: false
-      - key: GIGACHAT_SCOPE
-        value: GIGACHAT_API_PERS
-      - key: GIGACHAT_MODEL
-        value: GigaChat-2
-      - key: GIGACHAT_VERIFY_SSL_CERTS
-        value: "false"
