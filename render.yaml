@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: pulsechat-flet-ai
+    name: chat-bot
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
@@ -8,7 +8,11 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.7
-      - key: GEMINI_API_KEY
+      - key: GIGACHAT_CREDENTIALS
         sync: false
-      - key: GEMINI_MODEL
-        value: gemini-2.5-flash
+      - key: GIGACHAT_SCOPE
+        value: GIGACHAT_API_PERS
+      - key: GIGACHAT_MODEL
+        value: GigaChat-2
+      - key: GIGACHAT_VERIFY_SSL_CERTS
+        value: "false"

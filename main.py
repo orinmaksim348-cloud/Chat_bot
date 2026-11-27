@@ -1,4 +1,4 @@
-"""PulseChat — WhatsApp-подобный мессенджер с ИИ-чат-ботом на Flet 1.0."""
+"""PulseChat — WhatsApp-подобный мессенджер с ИИ (GigaChat + Gemini) на Flet 1.0."""
 
 from __future__ import annotations
 
@@ -14,6 +14,8 @@ from dotenv import load_dotenv
 from ai_service import (
     AIConfig,
     DEFAULT_GEMINI_MODEL,
+    DEFAULT_GIGACHAT_MODEL,
+    DEFAULT_GIGACHAT_SCOPE,
     DEFAULT_OPENAI_BASE_URL,
     DEFAULT_OPENAI_MODEL,
     generate_ai_reply,
@@ -93,15 +95,15 @@ def create_default_chats() -> list[ChatRoom]:
             quick_prompts=[
                 "Придумай 5 идей для пет-проекта на Python",
                 "Объясни REST API простыми словами",
-                "Как выложить этот мессенджер на бесплатный хостинг?",
+                "Помоги составить план на день",
             ],
             messages=[
                 {
                     "id": uuid.uuid4().hex,
                     "sender": "in",
                     "text": (
-                        "Привет! Я ИИ-бот на базе Flet. Напиши любой вопрос — "
-                        "или нажми на одну из быстрых подсказок ниже."
+                        "Привет! Я ИИ-бот на базе Flet. Поддерживаю GigaChat и Google Gemini. "
+                        "Напиши любой вопрос или нажми на подсказку ниже."
                     ),
                     "time": t,
                     "read": True,
@@ -187,12 +189,13 @@ def main(page: ft.Page) -> None:
 
     theme_name = "dark"
     ai_config = AIConfig.from_env()
+    env_has_giga = bool(ai_config.gigachat_credentials)
     env_has_gemini = bool(ai_config.gemini_api_key)
     env_has_openai = bool(ai_config.openai_api_key)
 
     chats: list[ChatRoom] = create_default_chats()
     active_chat_id: str = chats[0].id
-    filter_mode: str = "all"  # "all" | "bots" | "personal"
+    filter_mode: str = "all"
     search_query: str = ""
     typing_chat_id: str | None = None
     reply_target: dict[str, str] | None = None
@@ -208,17 +211,20 @@ def main(page: ft.Page) -> None:
         return chats[0]
 
     def is_mobile() -> bool:
-        w = page.width or 1024
-        return w < 760
+        return (page.width or 1024) < 760
 
     def show_snack(text: str) -> None:
         page.snack_bar = ft.SnackBar(ft.Text(text))
         page.snack_bar.open = True
         page.update()
 
-    # UI Containers (rebuilt on state updates)
     sidebar_list = ft.ListView(expand=True, spacing=0, padding=0)
-    messages_list = ft.ListView(expand=True, spacing=8, padding=ft.Padding.symmetric(vertical=14, horizontal=16), auto_scroll=True)
+    messages_list = ft.ListView(
+        expand=True,
+        spacing=8,
+        padding=ft.Padding.symmetric(vertical=14, horizontal=16),
+        auto_scroll=True,
+    )
     quick_prompts_row = ft.Row(wrap=True, spacing=6, run_spacing=6)
 
     search_field = ft.TextField(
@@ -244,7 +250,6 @@ def main(page: ft.Page) -> None:
     reply_preview_txt = ft.Text("", size=12.5, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)
     reply_bar = ft.Container(visible=False)
 
-    # Header dynamic refs
     active_avatar_txt = ft.Text("", color="#ffffff", weight=ft.FontWeight.BOLD, size=14)
     active_avatar_circle = ft.Container(
         width=40,
@@ -261,7 +266,6 @@ def main(page: ft.Page) -> None:
         bgcolor="#1a00a884",
     )
     active_status_txt = ft.Text("", size=12)
-
     ai_status_label = ft.Text("", size=11.5)
 
     back_btn = ft.IconButton(icon=ft.Icons.ARROW_BACK, tooltip="К списку чатов", visible=False)
@@ -471,25 +475,30 @@ def main(page: ft.Page) -> None:
             active_status_txt.value = "печатает..."
             active_status_txt.color = c["accent"]
         elif chat.is_bot:
-            if provider == "gemini":
-                active_status_txt.value = f"в сети · Gemini ({ai_config.gemini_model})"
+            if provider == "gigachat":
+                active_status_txt.value = f"в сети · {ai_config.gigachat_model}"
+            elif provider == "gemini":
+                active_status_txt.value = f"в сети · {ai_config.gemini_model}"
             elif provider == "openai":
                 active_status_txt.value = f"в сети · {ai_config.openai_model}"
             else:
-                active_status_txt.value = "в сети · демо-режим (добавьте API-ключ)"
+                active_status_txt.value = "в сети · добавьте ключ ИИ в настройках"
             active_status_txt.color = c["accent"]
         else:
             active_status_txt.value = chat.status
             active_status_txt.color = c["text_secondary"]
 
-        if provider == "gemini":
-            ai_status_label.value = "ИИ: Gemini"
+        if provider == "gigachat":
+            ai_status_label.value = f"GigaChat · {ai_config.gigachat_model}"
+            ai_status_label.color = c["accent"]
+        elif provider == "gemini":
+            ai_status_label.value = f"Gemini · {ai_config.gemini_model}"
             ai_status_label.color = c["accent"]
         elif provider == "openai":
-            ai_status_label.value = "ИИ: OpenAI API"
+            ai_status_label.value = f"AI · {ai_config.openai_model}"
             ai_status_label.color = c["accent"]
         else:
-            ai_status_label.value = "ИИ: демо (без ключа)"
+            ai_status_label.value = "ИИ: без ключа"
             ai_status_label.color = c["text_secondary"]
 
     async def copy_message_text(text: str) -> None:
@@ -546,7 +555,13 @@ def main(page: ft.Page) -> None:
                             spacing=1,
                             controls=[
                                 ft.Text(rt["author"], size=11.5, weight=ft.FontWeight.W_600, color=c["accent"]),
-                                ft.Text(rt["text"], size=12, color=c["text_secondary"], max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                                ft.Text(
+                                    rt["text"],
+                                    size=12,
+                                    color=c["text_secondary"],
+                                    max_lines=1,
+                                    overflow=ft.TextOverflow.ELLIPSIS,
+                                ),
                             ],
                         ),
                     )
@@ -580,7 +595,10 @@ def main(page: ft.Page) -> None:
                 tooltip="Действия",
                 items=[
                     ft.PopupMenuItem(content="Ответить", on_click=lambda e, m=msg: set_reply(m)),
-                    ft.PopupMenuItem(content="Копировать", on_click=lambda e, txt=msg["text"]: page.run_task(copy_message_text, txt)),
+                    ft.PopupMenuItem(
+                        content="Копировать",
+                        on_click=lambda e, txt=msg["text"]: page.run_task(copy_message_text, txt),
+                    ),
                     ft.PopupMenuItem(content="Удалить", on_click=lambda e, mid=msg["id"]: delete_message(mid)),
                 ],
             )
@@ -630,7 +648,6 @@ def main(page: ft.Page) -> None:
                 )
             )
 
-        # Quick prompts under chat when bot chat has prompts
         quick_prompts_row.controls.clear()
         if chat.is_bot and chat.quick_prompts and typing_chat_id != chat.id:
             for prompt in chat.quick_prompts:
@@ -701,7 +718,6 @@ def main(page: ft.Page) -> None:
 
         render_all()
 
-    # Dialogs
     def open_new_chat_dialog(_=None) -> None:
         name_tf = ft.TextField(label="Имя бота или название чата", hint_text="Например: Маркетолог ИИ")
         is_bot_sw = ft.Switch(label="Это ИИ-чат-бот", value=True)
@@ -727,7 +743,7 @@ def main(page: ft.Page) -> None:
                 avatar_text=name[:2].upper(),
                 color=palette[len(chats) % len(palette)],
                 is_bot=is_bot,
-                status="в сети · свой ИИ-бот" if is_bot else "личные заметки",
+                status="в сети · ИИ-бот" if is_bot else "личные заметки",
                 system_prompt=(prompt_tf.value or "").strip(),
                 messages=(
                     [
@@ -768,17 +784,44 @@ def main(page: ft.Page) -> None:
             label="Провайдер ИИ",
             value=ai_config.provider,
             options=[
-                ft.dropdown.Option("auto", "Авто (Gemini, затем OpenAI)"),
-                ft.dropdown.Option("gemini", "Google Gemini API"),
+                ft.dropdown.Option("auto", "Авто (GigaChat → Gemini → OpenAI)"),
+                ft.dropdown.Option("gigachat", "GigaChat API (Сбер)"),
+                ft.dropdown.Option("gemini", "Google Gemini / Vertex Express"),
                 ft.dropdown.Option("openai", "OpenAI-совместимый API"),
             ],
         )
+        giga_creds_tf = ft.TextField(
+            label="GIGACHAT_CREDENTIALS (Authorization key)",
+            password=True,
+            can_reveal_password=True,
+            value="" if env_has_giga else ai_config.gigachat_credentials,
+            hint_text="Задан через переменную окружения" if env_has_giga else "Base64 ключ из GigaChat Studio",
+        )
+        giga_scope_dd = ft.Dropdown(
+            label="GigaChat Scope",
+            value=ai_config.gigachat_scope or DEFAULT_GIGACHAT_SCOPE,
+            options=[
+                ft.dropdown.Option("GIGACHAT_API_PERS", "GIGACHAT_API_PERS (Физлица)"),
+                ft.dropdown.Option("GIGACHAT_API_B2B", "GIGACHAT_API_B2B (Бизнес)"),
+                ft.dropdown.Option("GIGACHAT_API_CORP", "GIGACHAT_API_CORP (Корпоративный)"),
+            ],
+        )
+        giga_model_dd = ft.Dropdown(
+            label="Модель GigaChat",
+            value=ai_config.gigachat_model or DEFAULT_GIGACHAT_MODEL,
+            options=[
+                ft.dropdown.Option("GigaChat-2", "GigaChat-2"),
+                ft.dropdown.Option("GigaChat-2-Pro", "GigaChat-2-Pro"),
+                ft.dropdown.Option("GigaChat-2-Max", "GigaChat-2-Max"),
+                ft.dropdown.Option("GigaChat", "GigaChat"),
+            ],
+        )
         gemini_key_tf = ft.TextField(
-            label="GEMINI_API_KEY (Google AI Studio)",
+            label="GEMINI_API_KEY (AI Studio или Vertex AQ.)",
             password=True,
             can_reveal_password=True,
             value="" if env_has_gemini else ai_config.gemini_api_key,
-            hint_text="Задан через переменную окружения" if env_has_gemini else "AIza...",
+            hint_text="Задан через переменную окружения" if env_has_gemini else "AIza... или AQ....",
         )
         gemini_model_tf = ft.TextField(
             label="Модель Gemini",
@@ -787,7 +830,6 @@ def main(page: ft.Page) -> None:
         openai_url_tf = ft.TextField(
             label="OpenAI-совместимый Base URL",
             value=ai_config.openai_base_url or DEFAULT_OPENAI_BASE_URL,
-            hint_text="https://openrouter.ai/api/v1 или https://api.groq.com/openai/v1",
         )
         openai_key_tf = ft.TextField(
             label="AI_API_KEY",
@@ -797,19 +839,27 @@ def main(page: ft.Page) -> None:
             hint_text="Задан через переменную окружения" if env_has_openai else "sk-...",
         )
         openai_model_tf = ft.TextField(
-            label="Модель (OpenAI / Groq / OpenRouter)",
+            label="Модель OpenAI-совместимого API",
             value=ai_config.openai_model or DEFAULT_OPENAI_MODEL,
         )
 
         def save_settings(_e) -> None:
             ai_config.provider = provider_dd.value or "auto"
+            if (giga_creds_tf.value or "").strip():
+                ai_config.gigachat_credentials = giga_creds_tf.value.strip()
+            ai_config.gigachat_scope = giga_scope_dd.value or DEFAULT_GIGACHAT_SCOPE
+            ai_config.gigachat_model = giga_model_dd.value or DEFAULT_GIGACHAT_MODEL
+            ai_config.invalidate_giga_token()
+
             if (gemini_key_tf.value or "").strip():
                 ai_config.gemini_api_key = gemini_key_tf.value.strip()
             ai_config.gemini_model = (gemini_model_tf.value or DEFAULT_GEMINI_MODEL).strip()
+
             ai_config.openai_base_url = (openai_url_tf.value or DEFAULT_OPENAI_BASE_URL).strip()
             if (openai_key_tf.value or "").strip():
                 ai_config.openai_api_key = openai_key_tf.value.strip()
             ai_config.openai_model = (openai_model_tf.value or DEFAULT_OPENAI_MODEL).strip()
+
             page.pop_dialog()
             render_all()
             show_snack("Настройки ИИ сохранены")
@@ -817,13 +867,17 @@ def main(page: ft.Page) -> None:
         dlg = ft.AlertDialog(
             title=ft.Text("Настройки ИИ"),
             content=ft.Container(
-                width=420,
+                width=430,
+                height=440,
                 content=ft.Column(
-                    tight=True,
                     scroll=ft.ScrollMode.AUTO,
                     spacing=10,
                     controls=[
                         provider_dd,
+                        giga_creds_tf,
+                        giga_scope_dd,
+                        giga_model_dd,
+                        ft.Divider(height=8),
                         gemini_key_tf,
                         gemini_model_tf,
                         ft.Divider(height=8),
@@ -865,7 +919,6 @@ def main(page: ft.Page) -> None:
         apply_layout()
         page.update()
 
-    # Wire handlers
     search_field.on_change = on_search_change
     msg_input.on_submit = lambda e: page.run_task(send_message_async)
     send_btn.on_click = lambda e: page.run_task(send_message_async)
@@ -875,14 +928,18 @@ def main(page: ft.Page) -> None:
     clear_chat_btn.on_click = clear_active_chat
     back_btn.on_click = on_mobile_back
 
-    # Static structural shells
     sidebar_header = ft.Container(height=60, padding=ft.Padding.symmetric(horizontal=12))
     search_wrap = ft.Container(padding=ft.Padding.only(left=12, right=12, top=8, bottom=8))
     sidebar_panel = ft.Container(width=340)
 
     chat_header = ft.Container(height=60, padding=ft.Padding.symmetric(horizontal=12))
     quick_bar = ft.Container(padding=ft.Padding.symmetric(vertical=4, horizontal=16), content=quick_prompts_row)
-    composer_box = ft.Container(border_radius=12, padding=ft.Padding.symmetric(vertical=2, horizontal=12), expand=True, content=msg_input)
+    composer_box = ft.Container(
+        border_radius=12,
+        padding=ft.Padding.symmetric(vertical=2, horizontal=12),
+        expand=True,
+        content=msg_input,
+    )
     composer_bar = ft.Container(padding=ft.Padding.symmetric(vertical=8, horizontal=12))
     chat_panel = ft.Container(expand=True)
 
@@ -1014,7 +1071,6 @@ def main(page: ft.Page) -> None:
             ],
         )
 
-        # Responsive toggle
         mobile = is_mobile()
         back_btn.visible = mobile
         if mobile:
